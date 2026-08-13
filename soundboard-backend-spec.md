@@ -1,7 +1,7 @@
 # Desktop Soundboard — Rust/Tauri Backend Implementation Specification
 
-Version: 1.0
-Status: implementation-ready MVP
+Version: 1.1
+Status: implemented desktop release
 Companion document: `soundboard-frontend-spec.md`
 
 ## 1. Purpose and agent boundary
@@ -15,7 +15,7 @@ The backend agent owns only `src-tauri/**`, including `Cargo.toml`, `Cargo.lock`
 - Target Windows, macOS, and Linux desktop.
 - A shortcut is global for as long as the process runs, including when the window is unfocused or minimized, except while shortcut capture intentionally suspends native registrations.
 - Closing the main window exits; no tray or autostart in the MVP.
-- Output uses the current default system audio device. Output-device selection and microphone/virtual-cable routing are out of scope.
+- Ordinary playback uses the current default system audio device. Optional routing captures a selected physical microphone and sends it plus soundboard playback to a separately installed virtual audio device.
 - Copy every successful import into the app data directory. Never persist dependence on the user's source path.
 - Guarantee MP3, WAV, OGG/Vorbis, and FLAC.
 - Default grid is 4 × 4; rows and columns are independently configurable from 1 through 12.
@@ -214,6 +214,23 @@ Never delete a user source file.
 
 Acceptance performance on a normal release build: with audio already cached and the device available, enqueue-to-start work must avoid disk I/O; 20 rapid triggers of the same clip create 20 overlapping starts without interruption or a panic.
 
+### 7.1 Driver-assisted virtual microphone
+
+Soundboard does not install or implement an audio driver. Users install BlackHole 2ch on macOS or VB-CABLE on Windows from the vendor. The backend enumerates stable CPAL device IDs, identifies likely virtual outputs for UI guidance, and accepts any explicitly selected output.
+
+When routing is active:
+
+- a second Kira manager targets the selected virtual output;
+- every soundboard trigger starts on that virtual manager and, when monitoring is enabled, on the normal default-output manager;
+- a CPAL input stream captures the selected physical microphone, mixes its channels to mono, applies the configured gain, and sends it to a CPAL stream on the same virtual output;
+- a bounded lock-free ring buffer, linear sample-rate conversion, and small drift correction isolate the input and output device clocks;
+- microphone audio is never recorded to disk or monitored locally;
+- microphone and clip gains are independently configurable from 0–200%.
+
+Store routing preferences separately from board state in crash-safe app-data JSON. At startup, attempt to restore enabled routing before sound runtime availability is finalized. Missing devices, permission denial, and interrupted streams produce recoverable routing status/errors and never block imports, editing, or settings changes. Configuration persistence failure restores the previous routing configuration.
+
+The virtual driver remains outside the DMG/NSIS artifact. macOS bundles include `NSMicrophoneUsageDescription`; Windows uses normal desktop microphone privacy controls. Automated tests use fake routing adapters and pure resampler/device-name tests rather than opening real hardware.
+
 ## 8. Global shortcuts
 
 Use the Rust API of `tauri-plugin-global-shortcut`, not JavaScript registration.
@@ -390,6 +407,12 @@ Use stable machine-readable codes:
 | `FILE_TOO_LARGE` | Include `maxBytes` and observed `bytes` |
 | `AUDIO_DECODE_FAILED` | Chosen file cannot be decoded; no internal path in message |
 | `AUDIO_DEVICE_UNAVAILABLE` | Default output cannot initialize |
+| `AUDIO_DEVICE_ENUMERATION_FAILED` | Input/output devices cannot be listed |
+| `AUDIO_INPUT_NOT_FOUND` | Selected physical microphone is missing |
+| `VIRTUAL_OUTPUT_NOT_FOUND` | Selected virtual output is missing |
+| `INVALID_AUDIO_ROUTING` | Device IDs or gain values are invalid |
+| `AUDIO_ROUTING_FAILED` | Input or virtual-output streams cannot start |
+| `AUDIO_ROUTING_INTERRUPTED` | An active routing stream stopped unexpectedly |
 | `PLAYBACK_LIMIT_REACHED` | Configured simultaneous-voice capacity is exhausted |
 | `SHORTCUT_INVALID` | Include a user-safe `reason` |
 | `SHORTCUT_CONFLICT` | Include the exact shape in Section 8.3 |
@@ -407,10 +430,11 @@ Messages are concise and safe for display. Log technical context locally, but ne
 1. Resolve/create the app data and audio directories.
 2. Load, recover, migrate, and validate persisted state.
 3. Initialize the audio worker and default device.
-4. Preload each referenced audio file; record per-cell warnings without aborting unrelated cells.
-5. Initialize the global-shortcut plugin and register valid unique shortcuts.
-6. Construct the coordinator and expose Tauri commands.
-7. Open the main window.
+4. Load routing settings and attempt to restore enabled microphone/virtual-output streams.
+5. Preload each referenced audio file; record per-cell warnings without aborting unrelated cells.
+6. Initialize the global-shortcut plugin and register valid unique shortcuts.
+7. Construct the coordinator and expose Tauri commands.
+8. Open the main window.
 
 The frontend's first `get_state` must see complete runtime `playable` and `shortcutStatus` values. Do not race initialization after the window becomes interactive.
 
@@ -447,6 +471,9 @@ Cover at least:
 15. missing/corrupt audio affects only its own cell;
 16. 20 rapid plays create 20 independent service requests;
 17. release events contain the correct trigger and IDs.
+18. routing settings validate and round-trip independently of board state;
+19. routing configuration rolls back on persistence failure;
+20. virtual-device detection and sample-rate conversion are deterministic without audio hardware.
 
 Use temporary directories and fake audio/hotkey/dialog adapters. Tests must not register real global shortcuts or play through the developer's speakers.
 
@@ -466,9 +493,10 @@ On each supported OS, verify:
 - grid shrink relocates sounds when capacity exists; a capacity-blocked shrink reports every affected outside cell;
 - closing the app releases registered shortcuts;
 - no audio device and a missing managed file produce recoverable UI states.
+- BlackHole/VB-CABLE detection, microphone permission, voice passthrough, clip routing, gain changes, monitoring, restart restoration, device removal, and stopping routing.
 
 The backend is done when `cargo fmt --check`, strict Clippy, tests, and release build pass; the packaged app needs no network access; the IPC contract exactly matches Section 10; and the mutation rollback guarantees above are demonstrated by tests.
 
 ## 15. Explicit non-goals
 
-Do not implement audio recording, microphone injection, virtual audio devices, selectable output devices, per-sound volume, trimming, looping, pause/stop, stop-all, streaming long files, drag-and-drop, cell reordering, multiple boards, cloud sync, tray mode, autostart, or automatic updates in this MVP.
+Do not implement a bundled virtual-audio driver, recording microphone content to disk, per-sound volume, trimming, looping, pause/stop, stop-all, streaming long files, drag-and-drop, cell reordering, multiple boards, cloud sync, tray mode, autostart, or automatic updates.

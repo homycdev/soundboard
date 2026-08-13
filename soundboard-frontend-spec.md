@@ -1,7 +1,7 @@
 # Desktop Soundboard — UI/Frontend Implementation Specification
 
-Version: 1.0
-Status: implementation-ready MVP
+Version: 1.1
+Status: implemented desktop release
 Companion document: `soundboard-backend-spec.md`
 
 ## 1. Purpose and agent boundary
@@ -25,7 +25,7 @@ These decisions remove ambiguity for the MVP:
 - On macOS, the main Tauri webview accepts the first mouse event so one tap on an inactive window both activates it and invokes the tapped cell or grid-settings control. Shortcut recording still ignores input while the app is inactive.
 - Shortcuts are global: they work while the process is running even when the window is unfocused or minimized, except while the shortcut-capture modal intentionally suspends them.
 - Closing the window quits the app. System tray behavior and autostart are not part of the MVP.
-- Audio plays through the operating system's current default output device. Selecting an output device or injecting audio into a microphone/virtual cable is not part of the MVP.
+- Audio plays through the operating system's current default output device. Optional virtual-microphone routing duplicates clips to an installed virtual audio device and passes through a selected physical microphone.
 - Imported files are copied into app-owned storage, so moving or deleting the original file does not break the cell.
 - Guaranteed import formats are MP3, WAV, OGG/Vorbis, and FLAC.
 - The default grid is 4 columns by 4 rows. Each dimension is configurable from 1 through 12.
@@ -210,6 +210,14 @@ The header settings button opens a modal with integer steppers/inputs for Rows a
 
 When shrinking, sounds already inside the requested bounds keep their coordinates. Sounds outside the bounds move, in their existing row-major order, into empty target cells in row-major order. If the requested grid has fewer total cells than occupied sounds, the backend returns `GRID_SHRINK_BLOCKED`; keep the dialog open and list every affected outside cell by sound name and one-based row/column. Resizing must never delete a sound.
 
+### 5.8 Virtual-microphone routing
+
+The `Audio` header control opens a modal that lists physical microphone inputs and audio outputs. Prefer outputs identified as virtual devices and explain the platform prerequisite: BlackHole 2ch on macOS or VB-CABLE on Windows. The driver is installed separately and is never bundled or downloaded by Soundboard.
+
+The user selects an input microphone and virtual output, adjusts microphone and soundboard gains from 0–200%, chooses whether clips are also monitored through the normal default output, and starts routing. Active, disabled, and interrupted states appear with both text and color. The modal must allow device refresh, retry, settings updates, and stopping routing. It also warns users to select the virtual device in their call app, use headphones, and disable call-app noise suppression if it removes effects.
+
+Routing settings persist across restarts. Missing devices or denied microphone permission must not prevent ordinary soundboard management. They produce a recoverable inline error and an attention state on the header control.
+
 ## 6. Accessibility and keyboard behavior
 
 - Every cell is a real `<button>` or has equivalent button semantics and behavior.
@@ -302,6 +310,9 @@ Commands:
 | `set_shortcut` | `{ cellId, shortcut: { modifiers, code } }` | `AppSnapshot` |
 | `clear_shortcut` | `{ cellId }` | `AppSnapshot` |
 | `resize_grid` | `{ rows, columns }` | `AppSnapshot` |
+| `get_audio_routing` | none | `AudioRoutingSnapshot` |
+| `configure_audio_routing` | `{ input: AudioRoutingInput }` | `AudioRoutingSnapshot` |
+| `disable_audio_routing` | none | `AudioRoutingSnapshot` |
 
 Events:
 
@@ -320,6 +331,7 @@ Every bridge call must catch the rejected Tauri invocation and normalize it to `
 | `GRID_SHRINK_BLOCKED` | Inline in grid settings with all blocking cells |
 | `UNSUPPORTED_FORMAT`, `FILE_TOO_LARGE`, `AUDIO_DECODE_FAILED` | Toast; retain old/empty cell state |
 | `AUDIO_DEVICE_UNAVAILABLE`, `PLAYBACK_LIMIT_REACHED` | Toast from command or playback-failed event |
+| `AUDIO_INPUT_NOT_FOUND`, `VIRTUAL_OUTPUT_NOT_FOUND`, `AUDIO_ROUTING_FAILED`, `AUDIO_ROUTING_INTERRUPTED` | Inline in audio-routing modal; retain prior persisted settings |
 | `PERSISTENCE_FAILED` | Error toast; retain snapshot from before the attempted mutation |
 | `STATE_VERSION_UNSUPPORTED` | Full initial-load error; explain that the data was created by a newer app version and was left untouched |
 | `NOT_FOUND`, `CELL_EMPTY`, `CELL_OCCUPIED`, `INTERNAL` | Error toast, then refresh with `get_state` when state may be stale |
@@ -356,9 +368,10 @@ Provide a mock bridge fixture and automated tests covering at least:
 15. warning and unplayable states remain manageable through replace/delete;
 16. all primary workflows work using only the keyboard;
 17. no component receives or renders a filesystem path.
+18. routing dialog selects a microphone and virtual output, applies gains/monitoring, reflects active state, refreshes devices, and stops routing.
 
 The frontend is done when type-check, lint, unit/component tests, and production build pass; the app remains usable at the minimum window size and 200% scaling; and every command/event name and field matches Section 7 exactly.
 
 ## 11. Explicit non-goals
 
-Do not add drag-and-drop, waveform rendering, per-sound volume, trimming, looping, stop-all, output-device selection, audio recording, microphone routing, cloud sync, categories/pages, search, cell reordering, themes, tray mode, autostart, or automatic updates in this MVP.
+Do not add drag-and-drop, waveform rendering, per-sound volume, trimming, looping, stop-all, a bundled virtual-audio driver, microphone recording to disk, cloud sync, categories/pages, search, cell reordering, themes, tray mode, autostart, or automatic updates.

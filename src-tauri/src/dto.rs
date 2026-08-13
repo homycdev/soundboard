@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{AudioFormat, Modifier, PersistedState, Shortcut};
+use crate::domain::{
+    AudioFormat, AudioRoutingSettings, Modifier, PersistedState, ROUTING_GAIN_MAX, Shortcut,
+};
 use crate::hotkeys::normalize::format_shortcut;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +101,86 @@ pub struct AppSnapshot {
     pub grid: GridDto,
     pub cells: Vec<CellDto>,
     pub warnings: Vec<AppWarningDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDeviceDto {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+    pub is_virtual: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioRoutingSettingsDto {
+    pub enabled: bool,
+    pub input_device_id: Option<String>,
+    pub virtual_output_device_id: Option<String>,
+    pub microphone_gain_percent: u16,
+    pub soundboard_gain_percent: u16,
+    pub monitor_enabled: bool,
+    pub gain_max: u16,
+}
+
+impl From<&AudioRoutingSettings> for AudioRoutingSettingsDto {
+    fn from(settings: &AudioRoutingSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            input_device_id: settings.input_device_id.clone(),
+            virtual_output_device_id: settings.virtual_output_device_id.clone(),
+            microphone_gain_percent: settings.microphone_gain_percent,
+            soundboard_gain_percent: settings.soundboard_gain_percent,
+            monitor_enabled: settings.monitor_enabled,
+            gain_max: ROUTING_GAIN_MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioRoutingInput {
+    pub input_device_id: String,
+    pub virtual_output_device_id: String,
+    pub microphone_gain_percent: u16,
+    pub soundboard_gain_percent: u16,
+    pub monitor_enabled: bool,
+}
+
+impl From<AudioRoutingInput> for AudioRoutingSettings {
+    fn from(input: AudioRoutingInput) -> Self {
+        Self {
+            schema_version: crate::domain::ROUTING_SETTINGS_VERSION,
+            enabled: true,
+            input_device_id: Some(input.input_device_id),
+            virtual_output_device_id: Some(input.virtual_output_device_id),
+            microphone_gain_percent: input.microphone_gain_percent,
+            soundboard_gain_percent: input.soundboard_gain_percent,
+            monitor_enabled: input.monitor_enabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioRoutingStatus {
+    Disabled,
+    Active,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioRoutingSnapshot {
+    pub status: AudioRoutingStatus,
+    pub input_devices: Vec<AudioDeviceDto>,
+    pub output_devices: Vec<AudioDeviceDto>,
+    pub settings: AudioRoutingSettingsDto,
+    pub error: Option<ProblemDto>,
+    pub recommended_driver: String,
+    pub driver_install_url: String,
+    pub driver_detected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

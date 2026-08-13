@@ -5,11 +5,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::json;
 
 use crate::domain::{
-    Assignment, PersistedState, Sound, parse_cell_id, validate_cell_in_grid, validate_grid,
+    Assignment, AudioRoutingSettings, PersistedState, Sound, parse_cell_id, validate_cell_in_grid,
+    validate_grid,
 };
 use crate::dto::{
-    AppSnapshot, AppWarningDto, CellDto, PlayResult, ProblemDto, ShortcutDto, ShortcutInput,
-    ShortcutStatus, SoundDto, Trigger, empty_snapshot,
+    AppSnapshot, AppWarningDto, AudioDeviceDto, AudioRoutingInput, AudioRoutingSettingsDto,
+    AudioRoutingSnapshot, AudioRoutingStatus, CellDto, PlayResult, ProblemDto, ShortcutDto,
+    ShortcutInput, ShortcutStatus, SoundDto, Trigger, empty_snapshot,
 };
 use crate::error::ApiError;
 use crate::hotkeys::normalize::normalize_shortcut;
@@ -34,6 +36,7 @@ struct RuntimeState {
 
 pub struct Coordinator {
     state: Mutex<PersistedState>,
+    audio_routing: Mutex<AudioRoutingSettings>,
     runtime: Mutex<RuntimeState>,
     mutation_gate: Mutex<()>,
     startup_error: Option<ApiError>,
@@ -51,11 +54,24 @@ impl Coordinator {
         hotkeys: Arc<dyn HotkeyService>,
         picker: Arc<dyn FilePicker>,
     ) -> Arc<Self> {
+        let mut startup_warnings = load.warnings;
+        let audio_routing = match repository.load_audio_routing() {
+            Ok(settings) => settings,
+            Err(error) => {
+                startup_warnings.push(AppWarningDto {
+                    code: error.code,
+                    message: error.message,
+                    cell_id: None,
+                });
+                AudioRoutingSettings::default()
+            }
+        };
         let coordinator = Arc::new(Self {
             state: Mutex::new(load.state),
+            audio_routing: Mutex::new(audio_routing),
             runtime: Mutex::new(RuntimeState {
                 sounds: HashMap::new(),
-                startup_warnings: load.warnings,
+                startup_warnings,
                 capture_active: false,
             }),
             mutation_gate: Mutex::new(()),
@@ -78,6 +94,7 @@ impl Coordinator {
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(PersistedState::default()),
+            audio_routing: Mutex::new(AudioRoutingSettings::default()),
             runtime: Mutex::new(RuntimeState::default()),
             mutation_gate: Mutex::new(()),
             startup_error: Some(error),
@@ -90,6 +107,19 @@ impl Coordinator {
 
     fn initialize_runtime(&self) {
         let state = lock(&self.state).clone();
+        let routing_settings = lock(&self.audio_routing).clone();
+        if routing_settings.enabled
+            && let Err(error) = self.audio.configure_routing(&routing_settings)
+        {
+            lock(&self.runtime).startup_warnings.push(AppWarningDto {
+                code: error.code,
+                message: format!(
+                    "Saved audio routing could not start: {} Open Audio routing to choose available devices.",
+                    error.message
+                ),
+                cell_id: None,
+            });
+        }
         let mut runtime = lock(&self.runtime);
         for assignment in &state.assignments {
             let sound_id = assignment.sound.id.to_string();
@@ -151,6 +181,123 @@ impl Coordinator {
     pub fn get_state(&self) -> Result<AppSnapshot, ApiError> {
         self.ensure_available()?;
         Ok(self.snapshot())
+    }
+
+    pub fn get_audio_routing(&self) -> Result<AudioRoutingSnapshot, ApiError> {
+        self.ensure_available()?;
+        self.audio_routing_snapshot()
+    }
+
+    pub fn configure_audio_routing(
+        &self,
+        input: AudioRoutingInput,
+    ) -> Result<AudioRoutingSnapshot, ApiError> {
+        self.ensure_available()?;
+        let settings = AudioRoutingSettings::from(input);
+        settings.validate()?;
+        let _gate = lock(&self.mutation_gate);
+        let previous = lock(&self.audio_routing).clone();
+        self.audio.configure_routing(&settings)?;
+        if let Err(error) = self.repository.save_audio_routing(&settings) {
+            if previous.enabled {
+                let _ = self.audio.configure_routing(&previous);
+            } else {
+                let _ = self.audio.disable_routing();
+            }
+            return Err(error);
+        }
+        *lock(&self.audio_routing) = settings;
+        self.refresh_audio_availability();
+        self.audio_routing_snapshot()
+    }
+
+    pub fn disable_audio_routing(&self) -> Result<AudioRoutingSnapshot, ApiError> {
+        self.ensure_available()?;
+        let _gate = lock(&self.mutation_gate);
+        let previous = lock(&self.audio_routing).clone();
+        if !previous.enabled {
+            return self.audio_routing_snapshot();
+        }
+        self.audio.disable_routing()?;
+        let mut disabled = previous.clone();
+        disabled.enabled = false;
+        if let Err(error) = self.repository.save_audio_routing(&disabled) {
+            let _ = self.audio.configure_routing(&previous);
+            return Err(error);
+        }
+        *lock(&self.audio_routing) = disabled;
+        self.refresh_audio_availability();
+        self.audio_routing_snapshot()
+    }
+
+    fn audio_routing_snapshot(&self) -> Result<AudioRoutingSnapshot, ApiError> {
+        let settings = lock(&self.audio_routing).clone();
+        let runtime = self.audio.routing_runtime()?;
+        let mut error = runtime.error.map(|error| ProblemDto {
+            code: error.code,
+            message: error.message,
+        });
+        let status = if !settings.enabled {
+            error = None;
+            AudioRoutingStatus::Disabled
+        } else if runtime.active {
+            AudioRoutingStatus::Active
+        } else {
+            if error.is_none() {
+                error = Some(ProblemDto {
+                    code: "AUDIO_ROUTING_INTERRUPTED".to_owned(),
+                    message: "Audio routing is not running. Refresh devices and apply the routing settings again."
+                        .to_owned(),
+                });
+            }
+            AudioRoutingStatus::Error
+        };
+        let input_devices = runtime
+            .input_devices
+            .into_iter()
+            .map(|device| AudioDeviceDto {
+                id: device.id,
+                name: device.name,
+                is_default: device.is_default,
+                is_virtual: device.is_virtual,
+            })
+            .collect::<Vec<_>>();
+        let output_devices = runtime
+            .output_devices
+            .into_iter()
+            .map(|device| AudioDeviceDto {
+                id: device.id,
+                name: device.name,
+                is_default: device.is_default,
+                is_virtual: device.is_virtual,
+            })
+            .collect::<Vec<_>>();
+        let driver_detected = output_devices.iter().any(|device| device.is_virtual);
+        let (recommended_driver, driver_install_url) = recommended_virtual_driver();
+        Ok(AudioRoutingSnapshot {
+            status,
+            input_devices,
+            output_devices,
+            settings: AudioRoutingSettingsDto::from(&settings),
+            error,
+            recommended_driver: recommended_driver.to_owned(),
+            driver_install_url: driver_install_url.to_owned(),
+            driver_detected,
+        })
+    }
+
+    fn refresh_audio_availability(&self) {
+        let available = self.audio.is_available();
+        for runtime in lock(&self.runtime).sounds.values_mut() {
+            let unavailable_output = runtime
+                .problem
+                .as_ref()
+                .is_some_and(|problem| problem.code == "AUDIO_DEVICE_UNAVAILABLE");
+            if unavailable_output || runtime.problem.is_none() {
+                runtime.playable = available;
+                runtime.problem = (!available).then(audio_device_problem);
+            }
+        }
     }
 
     pub fn set_shortcut_capture_active(&self, active: bool) -> Result<(), ApiError> {
@@ -822,6 +969,21 @@ fn audio_device_problem() -> ProblemDto {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn recommended_virtual_driver() -> (&'static str, &'static str) {
+    ("BlackHole 2ch", "https://existential.audio/blackhole/")
+}
+
+#[cfg(target_os = "windows")]
+fn recommended_virtual_driver() -> (&'static str, &'static str) {
+    ("VB-CABLE", "https://vb-audio.com/Cable/")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn recommended_virtual_driver() -> (&'static str, &'static str) {
+    ("a virtual audio cable", "")
+}
+
 fn runtime_for_loaded_sound(
     audio_available: bool,
     shortcut_status: Option<ShortcutStatus>,
@@ -860,6 +1022,7 @@ mod tests {
         audio_dir: PathBuf,
         state: Mutex<PersistedState>,
         fail_save: AtomicBool,
+        audio_routing: Mutex<AudioRoutingSettings>,
     }
 
     impl FakeRepository {
@@ -879,6 +1042,7 @@ mod tests {
                 audio_dir,
                 state: Mutex::new(state),
                 fail_save: AtomicBool::new(false),
+                audio_routing: Mutex::new(AudioRoutingSettings::default()),
             })
         }
 
@@ -916,6 +1080,18 @@ mod tests {
         fn audio_path(&self, stored_file_name: &str) -> Result<PathBuf, ApiError> {
             Ok(self.audio_dir.join(stored_file_name))
         }
+
+        fn load_audio_routing(&self) -> Result<AudioRoutingSettings, ApiError> {
+            Ok(lock(&self.audio_routing).clone())
+        }
+
+        fn save_audio_routing(&self, settings: &AudioRoutingSettings) -> Result<(), ApiError> {
+            if self.fail_save.swap(false, Ordering::AcqRel) {
+                return Err(ApiError::persistence());
+            }
+            *lock(&self.audio_routing) = settings.clone();
+            Ok(())
+        }
     }
 
     #[derive(Default)]
@@ -926,6 +1102,8 @@ mod tests {
         fail_load: Mutex<HashSet<String>>,
         plays: Mutex<Vec<PlaybackRequest>>,
         next_instance: AtomicUsize,
+        routing_active: AtomicBool,
+        routing_settings: Mutex<Option<AudioRoutingSettings>>,
     }
 
     impl FakeAudio {
@@ -970,6 +1148,36 @@ mod tests {
 
         fn try_play(&self, request: PlaybackRequest) {
             lock(&self.plays).push(request);
+        }
+
+        fn routing_runtime(&self) -> Result<crate::ports::AudioRoutingRuntime, ApiError> {
+            Ok(crate::ports::AudioRoutingRuntime {
+                active: self.routing_active.load(Ordering::Acquire),
+                input_devices: vec![crate::ports::AudioDeviceInfo {
+                    id: "input".into(),
+                    name: "Test microphone".into(),
+                    is_default: true,
+                    is_virtual: false,
+                }],
+                output_devices: vec![crate::ports::AudioDeviceInfo {
+                    id: "virtual".into(),
+                    name: "BlackHole 2ch".into(),
+                    is_default: false,
+                    is_virtual: true,
+                }],
+                error: None,
+            })
+        }
+
+        fn configure_routing(&self, settings: &AudioRoutingSettings) -> Result<(), ApiError> {
+            *lock(&self.routing_settings) = Some(settings.clone());
+            self.routing_active.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn disable_routing(&self) -> Result<(), ApiError> {
+            self.routing_active.store(false, Ordering::Release);
+            Ok(())
         }
     }
 
@@ -1077,6 +1285,54 @@ mod tests {
             modifiers: vec![modifier],
             code: code.into(),
         }
+    }
+
+    fn routing_input(microphone_gain_percent: u16) -> AudioRoutingInput {
+        AudioRoutingInput {
+            input_device_id: "input".into(),
+            virtual_output_device_id: "virtual".into(),
+            microphone_gain_percent,
+            soundboard_gain_percent: 100,
+            monitor_enabled: true,
+        }
+    }
+
+    #[test]
+    fn routing_configuration_persists_and_rolls_back_on_save_failure() {
+        let harness = Harness::new(PersistedState::default());
+
+        let active = harness
+            .coordinator
+            .configure_audio_routing(routing_input(85))
+            .unwrap();
+        assert_eq!(active.status, AudioRoutingStatus::Active);
+        assert_eq!(active.settings.microphone_gain_percent, 85);
+        assert_eq!(
+            lock(&harness.repository.audio_routing).microphone_gain_percent,
+            85
+        );
+
+        harness.repository.fail_next_save();
+        let error = harness
+            .coordinator
+            .configure_audio_routing(routing_input(120))
+            .unwrap_err();
+        assert_eq!(error.code, "PERSISTENCE_FAILED");
+        assert_eq!(
+            lock(&harness.audio.routing_settings)
+                .as_ref()
+                .unwrap()
+                .microphone_gain_percent,
+            85
+        );
+        assert_eq!(
+            lock(&harness.repository.audio_routing).microphone_gain_percent,
+            85
+        );
+
+        let disabled = harness.coordinator.disable_audio_routing().unwrap();
+        assert_eq!(disabled.status, AudioRoutingStatus::Disabled);
+        assert!(!lock(&harness.repository.audio_routing).enabled);
     }
 
     fn assignment(cell_id: &str, name: &str, shortcut: Option<Shortcut>) -> Assignment {

@@ -1,8 +1,8 @@
 {
   "name": "soundboard",
   "private": true,
-  "version": "0.1.0",
-  "description": "A fast, local-first desktop soundboard with global shortcuts.",
+  "version": "0.2.0",
+  "description": "A local-first desktop soundboard with global shortcuts and virtual-microphone routing.",
   "type": "module",
   "scripts": {
     "dev": "vite",

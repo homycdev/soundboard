@@ -15,8 +15,12 @@ concurrency:
 
 jobs:
   validate:
-    name: Frontend and Rust
-    runs-on: macos-latest
+    name: Frontend and Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -37,6 +41,12 @@ jobs:
 
       - name: Validate frontend
         run: npm run validate
+
+      - name: Validate macOS microphone usage description
+        if: runner.os == 'macOS'
+        run: |
+          plutil -lint src-tauri/Info.plist
+          plutil -extract NSMicrophoneUsageDescription raw src-tauri/Info.plist
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check

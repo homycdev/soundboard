@@ -49,6 +49,42 @@ export interface AppSnapshot {
   warnings: AppWarningDto[];
 }
 
+export interface AudioDeviceDto {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  isVirtual: boolean;
+}
+
+export interface AudioRoutingSettingsDto {
+  enabled: boolean;
+  inputDeviceId: string | null;
+  virtualOutputDeviceId: string | null;
+  microphoneGainPercent: number;
+  soundboardGainPercent: number;
+  monitorEnabled: boolean;
+  gainMax: number;
+}
+
+export interface AudioRoutingInput {
+  inputDeviceId: string;
+  virtualOutputDeviceId: string;
+  microphoneGainPercent: number;
+  soundboardGainPercent: number;
+  monitorEnabled: boolean;
+}
+
+export interface AudioRoutingSnapshot {
+  status: 'disabled' | 'active' | 'error';
+  inputDevices: AudioDeviceDto[];
+  outputDevices: AudioDeviceDto[];
+  settings: AudioRoutingSettingsDto;
+  error: SoundProblemDto | null;
+  recommendedDriver: string;
+  driverInstallUrl: string;
+  driverDetected: boolean;
+}
+
 export interface PlaybackStarted {
   instanceId: string;
   soundId: string;
@@ -74,6 +110,9 @@ export type Unlisten = () => void;
 
 export interface SoundboardBridge {
   getState(): Promise<AppSnapshot>;
+  getAudioRouting(): Promise<AudioRoutingSnapshot>;
+  configureAudioRouting(args: { input: AudioRoutingInput }): Promise<AudioRoutingSnapshot>;
+  disableAudioRouting(): Promise<AudioRoutingSnapshot>;
   setShortcutCaptureActive(args: { active: boolean }): Promise<void>;
   pickAndImportSound(args: { cellId: CellId }): Promise<AppSnapshot | null>;
   pickAndReplaceSound(args: { cellId: CellId }): Promise<AppSnapshot | null>;

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::coordinator::Coordinator;
-use crate::dto::{AppSnapshot, CommandTrigger, PlayResult, ShortcutInput};
+use crate::dto::{
+    AppSnapshot, AudioRoutingInput, AudioRoutingSnapshot, CommandTrigger, PlayResult, ShortcutInput,
+};
 use crate::error::ApiError;
 
 pub struct AppState {
@@ -13,6 +15,37 @@ pub struct AppState {
 #[tauri::command]
 pub fn get_state(state: State<'_, AppState>) -> Result<AppSnapshot, ApiError> {
     state.coordinator.get_state()
+}
+
+#[tauri::command]
+pub async fn get_audio_routing(
+    state: State<'_, AppState>,
+) -> Result<AudioRoutingSnapshot, ApiError> {
+    let coordinator = Arc::clone(&state.coordinator);
+    tauri::async_runtime::spawn_blocking(move || coordinator.get_audio_routing())
+        .await
+        .map_err(|_| ApiError::internal())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn configure_audio_routing(
+    state: State<'_, AppState>,
+    input: AudioRoutingInput,
+) -> Result<AudioRoutingSnapshot, ApiError> {
+    let coordinator = Arc::clone(&state.coordinator);
+    tauri::async_runtime::spawn_blocking(move || coordinator.configure_audio_routing(input))
+        .await
+        .map_err(|_| ApiError::internal())?
+}
+
+#[tauri::command]
+pub async fn disable_audio_routing(
+    state: State<'_, AppState>,
+) -> Result<AudioRoutingSnapshot, ApiError> {
+    let coordinator = Arc::clone(&state.coordinator);
+    tauri::async_runtime::spawn_blocking(move || coordinator.disable_audio_routing())
+        .await
+        .map_err(|_| ApiError::internal())?
 }
 
 #[tauri::command(rename_all = "camelCase")]

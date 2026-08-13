@@ -1,6 +1,8 @@
 import type {
   ApiError,
   AppSnapshot,
+  AudioRoutingInput,
+  AudioRoutingSnapshot,
   CellDto,
   CellId,
   PlaybackFailed,
@@ -65,23 +67,83 @@ export function createDemoSnapshot(): AppSnapshot {
   return snapshot;
 }
 
+export function createDemoRoutingSnapshot(): AudioRoutingSnapshot {
+  return {
+    status: 'disabled',
+    inputDevices: [
+      { id: 'mock:built-in-mic', name: 'Built-in Microphone', isDefault: true, isVirtual: false },
+      { id: 'mock:usb-mic', name: 'USB Microphone', isDefault: false, isVirtual: false },
+    ],
+    outputDevices: [
+      { id: 'mock:speakers', name: 'Built-in Speakers', isDefault: true, isVirtual: false },
+      { id: 'mock:blackhole', name: 'BlackHole 2ch', isDefault: false, isVirtual: true },
+    ],
+    settings: {
+      enabled: false,
+      inputDeviceId: null,
+      virtualOutputDeviceId: null,
+      microphoneGainPercent: 100,
+      soundboardGainPercent: 100,
+      monitorEnabled: true,
+      gainMax: 200,
+    },
+    error: null,
+    recommendedDriver: 'BlackHole 2ch',
+    driverInstallUrl: 'https://existential.audio/blackhole/',
+    driverDetected: true,
+  };
+}
+
 function apiError(code: string, message: string, details: Record<string, unknown> | null = null) {
   return { code, message, details } satisfies ApiError;
 }
 
 export class MockSoundboardBridge implements SoundboardBridge {
   private snapshot: AppSnapshot;
+  private routing: AudioRoutingSnapshot;
   private shortcutCaptureActive = false;
   private playbackStartedHandlers = new Set<(event: PlaybackStarted) => void>();
   private playbackFailedHandlers = new Set<(event: PlaybackFailed) => void>();
   private instance = 0;
 
-  constructor(snapshot: AppSnapshot = createDemoSnapshot()) {
+  constructor(
+    snapshot: AppSnapshot = createDemoSnapshot(),
+    routing: AudioRoutingSnapshot = createDemoRoutingSnapshot(),
+  ) {
     this.snapshot = structuredClone(snapshot);
+    this.routing = structuredClone(routing);
   }
 
   async getState() {
     return structuredClone(this.snapshot);
+  }
+
+  async getAudioRouting() {
+    return structuredClone(this.routing);
+  }
+
+  async configureAudioRouting({ input }: { input: AudioRoutingInput }) {
+    if (!this.routing.inputDevices.some((device) => device.id === input.inputDeviceId)) {
+      throw apiError('AUDIO_INPUT_NOT_FOUND', 'The selected microphone is no longer available.');
+    }
+    if (!this.routing.outputDevices.some((device) => device.id === input.virtualOutputDeviceId)) {
+      throw apiError('VIRTUAL_OUTPUT_NOT_FOUND', 'The selected virtual output is no longer available.');
+    }
+    this.routing.settings = {
+      enabled: true,
+      ...input,
+      gainMax: this.routing.settings.gainMax,
+    };
+    this.routing.status = 'active';
+    this.routing.error = null;
+    return structuredClone(this.routing);
+  }
+
+  async disableAudioRouting() {
+    this.routing.settings.enabled = false;
+    this.routing.status = 'disabled';
+    this.routing.error = null;
+    return structuredClone(this.routing);
   }
 
   async setShortcutCaptureActive({ active }: { active: boolean }) {

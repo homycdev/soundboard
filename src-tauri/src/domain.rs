@@ -11,6 +11,8 @@ use crate::hotkeys::normalize::{normalize_shortcut, validate_shortcut};
 pub const SCHEMA_VERSION: u32 = 1;
 pub const GRID_MIN: u8 = 1;
 pub const GRID_MAX: u8 = 12;
+pub const ROUTING_SETTINGS_VERSION: u32 = 1;
+pub const ROUTING_GAIN_MAX: u16 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,6 +84,76 @@ pub struct Sound {
 pub struct Assignment {
     pub cell_id: String,
     pub sound: Sound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioRoutingSettings {
+    pub schema_version: u32,
+    pub enabled: bool,
+    pub input_device_id: Option<String>,
+    pub virtual_output_device_id: Option<String>,
+    pub microphone_gain_percent: u16,
+    pub soundboard_gain_percent: u16,
+    pub monitor_enabled: bool,
+}
+
+impl Default for AudioRoutingSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: ROUTING_SETTINGS_VERSION,
+            enabled: false,
+            input_device_id: None,
+            virtual_output_device_id: None,
+            microphone_gain_percent: 100,
+            soundboard_gain_percent: 100,
+            monitor_enabled: true,
+        }
+    }
+}
+
+impl AudioRoutingSettings {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.schema_version != ROUTING_SETTINGS_VERSION {
+            return Err(ApiError::new(
+                "ROUTING_SETTINGS_VERSION_UNSUPPORTED",
+                "These audio-routing settings were created by a newer version of Soundboard.",
+            ));
+        }
+        if self.microphone_gain_percent > ROUTING_GAIN_MAX
+            || self.soundboard_gain_percent > ROUTING_GAIN_MAX
+        {
+            return Err(ApiError::new(
+                "INVALID_AUDIO_ROUTING",
+                "Microphone and soundboard gain must be between 0% and 200%.",
+            ));
+        }
+        if self.enabled {
+            if self.input_device_id.as_deref().is_none_or(str::is_empty) {
+                return Err(ApiError::new(
+                    "INVALID_AUDIO_ROUTING",
+                    "Choose the microphone that carries your voice.",
+                ));
+            }
+            if self
+                .virtual_output_device_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(ApiError::new(
+                    "INVALID_AUDIO_ROUTING",
+                    "Choose the virtual audio output used by your call app.",
+                ));
+            }
+            if self.input_device_id == self.virtual_output_device_id {
+                return Err(ApiError::new(
+                    "INVALID_AUDIO_ROUTING",
+                    "Choose a physical microphone that is different from the virtual output to prevent an audio feedback loop.",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,5 +359,47 @@ mod tests {
         assert!(validate_cell_in_grid("r1c2", &grid).is_ok());
         assert!(validate_cell_in_grid("r2c0", &grid).is_err());
         assert!(validate_cell_in_grid("r0c3", &grid).is_err());
+    }
+
+    #[test]
+    fn routing_requires_devices_only_when_enabled_and_bounds_gains() {
+        assert!(AudioRoutingSettings::default().validate().is_ok());
+
+        let missing = AudioRoutingSettings {
+            enabled: true,
+            ..AudioRoutingSettings::default()
+        };
+        assert_eq!(
+            missing.validate().unwrap_err().code,
+            "INVALID_AUDIO_ROUTING"
+        );
+
+        let valid = AudioRoutingSettings {
+            enabled: true,
+            input_device_id: Some("input".into()),
+            virtual_output_device_id: Some("output".into()),
+            microphone_gain_percent: ROUTING_GAIN_MAX,
+            soundboard_gain_percent: 0,
+            ..AudioRoutingSettings::default()
+        };
+        assert!(valid.validate().is_ok());
+
+        let feedback_loop = AudioRoutingSettings {
+            virtual_output_device_id: valid.input_device_id.clone(),
+            ..valid.clone()
+        };
+        assert_eq!(
+            feedback_loop.validate().unwrap_err().code,
+            "INVALID_AUDIO_ROUTING"
+        );
+
+        let too_loud = AudioRoutingSettings {
+            soundboard_gain_percent: ROUTING_GAIN_MAX + 1,
+            ..valid
+        };
+        assert_eq!(
+            too_loud.validate().unwrap_err().code,
+            "INVALID_AUDIO_ROUTING"
+        );
     }
 }

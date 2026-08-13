@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -116,7 +116,7 @@ impl JsonRepository {
 
     #[cfg(unix)]
     fn sync_directory(&self) -> std::io::Result<()> {
-        File::open(&self.root)?.sync_all()
+        fs::File::open(&self.root)?.sync_all()
     }
 
     #[cfg(not(unix))]

@@ -20,11 +20,15 @@ GitHub Actions builds native installers on the operating system that will run th
 4. Push a matching semantic-version tag:
 
 ```bash
-git tag v0.1.0
-git push origin main v0.1.0
+git tag v0.2.0
+git push origin main v0.2.0
 ```
 
 The `Release installers` workflow validates the project, builds both macOS architectures and Windows x64, creates a public GitHub Release, and attaches the installers. A failed platform build does not cancel the other matrix jobs.
+
+BlackHole and VB-CABLE are runtime prerequisites, not release assets. Do not copy, repackage, or install either vendor's driver in the workflow or Soundboard installer.
+
+Before tagging, manually verify routing on both platforms: device discovery, microphone permission, voice passthrough, soundboard playback in the call input, gains, monitoring, restart restoration, stopping, and recovery after disconnecting the virtual device. GitHub-hosted runners do not provide reliable microphones or virtual audio drivers, so CI covers the mixer and configuration through hardware-free tests.
 
 ## Release signing
 

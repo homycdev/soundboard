@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::domain::{PersistedState, SCHEMA_VERSION};
+use crate::domain::{AudioRoutingSettings, PersistedState, SCHEMA_VERSION};
 use crate::dto::AppWarningDto;
 use crate::error::ApiError;
 use crate::ports::{RepositoryLoad, StateRepository};
@@ -17,6 +17,9 @@ pub struct JsonRepository {
     current: PathBuf,
     next: PathBuf,
     previous: PathBuf,
+    routing_current: PathBuf,
+    routing_next: PathBuf,
+    routing_previous: PathBuf,
 }
 
 enum Candidate {
@@ -34,6 +37,9 @@ impl JsonRepository {
             current: root.join("state.json"),
             next: root.join("state.next.json"),
             previous: root.join("state.previous.json"),
+            routing_current: root.join("audio-routing.json"),
+            routing_next: root.join("audio-routing.next.json"),
+            routing_previous: root.join("audio-routing.previous.json"),
             root,
         };
         repository.ensure_directories()?;
@@ -237,6 +243,80 @@ impl StateRepository for JsonRepository {
         }
         Ok(self.audio_dir.join(path))
     }
+
+    fn load_audio_routing(&self) -> Result<AudioRoutingSettings, ApiError> {
+        let candidates = [
+            &self.routing_current,
+            &self.routing_next,
+            &self.routing_previous,
+        ];
+        let any_candidate = candidates.iter().any(|path| path.exists());
+        for path in candidates {
+            let Ok(bytes) = fs::read(path) else {
+                continue;
+            };
+            let Ok(settings) = serde_json::from_slice::<AudioRoutingSettings>(&bytes) else {
+                continue;
+            };
+            if settings.validate().is_err() {
+                continue;
+            }
+            if path != &self.routing_current {
+                self.save_audio_routing(&settings)?;
+            } else {
+                let _ = fs::remove_file(&self.routing_next);
+                let _ = fs::remove_file(&self.routing_previous);
+            }
+            return Ok(settings);
+        }
+        if any_candidate {
+            Err(ApiError::new(
+                "AUDIO_ROUTING_SETTINGS_INVALID",
+                "Saved audio-routing settings could not be read and were not applied.",
+            ))
+        } else {
+            Ok(AudioRoutingSettings::default())
+        }
+    }
+
+    fn save_audio_routing(&self, settings: &AudioRoutingSettings) -> Result<(), ApiError> {
+        settings.validate().map_err(|_| ApiError::persistence())?;
+        self.ensure_directories()?;
+        let bytes = serde_json::to_vec_pretty(settings).map_err(|_| ApiError::persistence())?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&self.routing_next)
+            .map_err(|_| ApiError::persistence())?;
+        file.write_all(&bytes)
+            .and_then(|_| file.flush())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| ApiError::persistence())?;
+        drop(file);
+        if self.routing_current.exists() {
+            Self::replace_path(&self.routing_current, &self.routing_previous)
+                .map_err(|_| ApiError::persistence())?;
+        }
+        if let Err(error) = Self::replace_path(&self.routing_next, &self.routing_current) {
+            if !self.routing_current.exists() && self.routing_previous.exists() {
+                let _ = Self::replace_path(&self.routing_previous, &self.routing_current);
+            }
+            log::warn!("audio-routing settings commit failed: {error}");
+            return Err(ApiError::persistence());
+        }
+        self.sync_directory().map_err(|_| ApiError::persistence())?;
+        let written = fs::read(&self.routing_current)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<AudioRoutingSettings>(&bytes).ok())
+            .is_some_and(|written| written == *settings && written.validate().is_ok());
+        if !written {
+            return Err(ApiError::persistence());
+        }
+        let _ = fs::remove_file(&self.routing_previous);
+        let _ = fs::remove_file(&self.routing_next);
+        Ok(())
+    }
 }
 
 fn migrate_to_current(value: Value, version: u32) -> Result<Value, ()> {
@@ -288,6 +368,27 @@ mod tests {
         let state = populated_state();
         repository.save(&state).unwrap();
         assert_eq!(repository.load().unwrap().state, state);
+    }
+
+    #[test]
+    fn audio_routing_settings_round_trip_separately_from_board_state() {
+        let directory = tempdir().unwrap();
+        let repository = JsonRepository::new(directory.path().into()).unwrap();
+        let settings = AudioRoutingSettings {
+            enabled: true,
+            input_device_id: Some("coreaudio:microphone".into()),
+            virtual_output_device_id: Some("coreaudio:BlackHole 2ch".into()),
+            microphone_gain_percent: 85,
+            soundboard_gain_percent: 120,
+            monitor_enabled: false,
+            ..AudioRoutingSettings::default()
+        };
+
+        repository.save_audio_routing(&settings).unwrap();
+
+        assert_eq!(repository.load_audio_routing().unwrap(), settings);
+        assert!(!repository.current.exists());
+        assert!(repository.routing_current.exists());
     }
 
     #[test]

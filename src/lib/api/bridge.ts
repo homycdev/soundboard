@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type {
   ApiError,
   AppSnapshot,
+  AudioRoutingSnapshot,
   PlaybackFailed,
   PlaybackStarted,
   SoundboardBridge,
@@ -43,6 +44,10 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export function createTauriBridge(): SoundboardBridge {
   return {
     getState: () => call<AppSnapshot>('get_state'),
+    getAudioRouting: () => call<AudioRoutingSnapshot>('get_audio_routing'),
+    configureAudioRouting: (args) =>
+      call<AudioRoutingSnapshot>('configure_audio_routing', args),
+    disableAudioRouting: () => call<AudioRoutingSnapshot>('disable_audio_routing'),
     setShortcutCaptureActive: (args) => call<void>('set_shortcut_capture_active', args),
     pickAndImportSound: (args) => call<AppSnapshot | null>('pick_and_import_sound', args),
     pickAndReplaceSound: (args) => call<AppSnapshot | null>('pick_and_replace_sound', args),

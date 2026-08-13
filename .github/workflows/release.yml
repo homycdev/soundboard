@@ -69,7 +69,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Soundboard ${{ github.ref_name }}
-          releaseBody: Download the installer for your operating system from the assets below.
+          releaseBody: Download the installer for your operating system from the assets below. Virtual-microphone routing requires BlackHole 2ch on macOS or VB-CABLE on Windows; drivers are installed separately from their official vendor sites.
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true

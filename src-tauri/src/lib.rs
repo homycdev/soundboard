@@ -86,6 +86,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
+            commands::get_audio_routing,
+            commands::configure_audio_routing,
+            commands::disable_audio_routing,
             commands::set_shortcut_capture_active,
             commands::pick_and_import_sound,
             commands::pick_and_replace_sound,

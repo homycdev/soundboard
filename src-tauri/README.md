@@ -1,6 +1,6 @@
 # Soundboard native core
 
-This directory contains the complete Tauri v2 backend. The frontend talks to it only through the commands registered in `src/lib.rs`; file access, audio decoding, persistence, and global-shortcut registration stay in Rust.
+This directory contains the complete Tauri v2 backend. The frontend talks to it only through the commands registered in `src/lib.rs`; file access, audio decoding, persistence, global-shortcut registration, device discovery, and microphone passthrough stay in Rust.
 
 ## Development checks
 
@@ -17,9 +17,11 @@ After the frontend has been built into `dist/`, `cargo run --manifest-path src-t
 
 ## Runtime data
 
-The backend resolves Tauri's application-data directory for `dev.homyc.soundboard` and owns `state.json`, crash-recovery candidates, corrupt-state backups, and UUID-named managed audio copies below that directory. Original import paths are never persisted or used after import.
+The backend resolves Tauri's application-data directory for `dev.homyc.soundboard` and owns `state.json`, `audio-routing.json`, crash-recovery candidates, corrupt-state backups, and UUID-named managed audio copies below that directory. Original import paths are never persisted or used after import.
 
-Mutations are coordinated as transactions: native selection happens outside the mutation gate, slow work happens without the state lock, persistence completes before in-memory state is published, and pre-commit cache/files/hotkeys are rolled back on failure. Kira and decoded audio live on one worker thread; the global-shortcut callback only performs a lookup and a non-blocking enqueue.
+Mutations are coordinated as transactions: native selection happens outside the mutation gate, slow work happens without the state lock, persistence completes before in-memory state is published, and pre-commit cache/files/hotkeys/routing are rolled back on failure. Kira and decoded audio live on one worker thread; the global-shortcut callback only performs a lookup and a non-blocking enqueue.
+
+Optional virtual-microphone routing uses a second Kira manager for the selected BlackHole/VB-CABLE output and a bounded CPAL microphone-passthrough stream. The external driver is never bundled. Microphone samples remain in memory and are discarded after delivery.
 
 ## Manual release matrix
 

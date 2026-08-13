@@ -4,6 +4,8 @@
   import type {
     ApiError,
     AppSnapshot,
+    AudioRoutingInput,
+    AudioRoutingSnapshot,
     CellDto,
     PlaybackFailed,
     PlaybackStarted,
@@ -11,6 +13,7 @@
     SoundboardBridge,
   } from './lib/api/contract';
   import AppHeader from './lib/components/AppHeader.svelte';
+  import AudioRoutingDialog from './lib/components/AudioRoutingDialog.svelte';
   import CellMenu from './lib/components/CellMenu.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
   import GridSettingsDialog from './lib/components/GridSettingsDialog.svelte';
@@ -47,6 +50,7 @@
 
   let status: 'loading' | 'ready' | 'error' = 'loading';
   let snapshot: AppSnapshot | null = null;
+  let audioRouting: AudioRoutingSnapshot | null = null;
   let initialError: ApiError | null = null;
   let pendingCells: Record<string, boolean> = {};
   let pulseVersions: Record<string, number> = {};
@@ -55,10 +59,13 @@
   let shortcutDialog: DialogState | null = null;
   let deleteDialog: DialogState | null = null;
   let settingsDialog: SettingsState | null = null;
+  let audioRoutingDialog: SettingsState | null = null;
   let toasts: Toast[] = [];
   let nextToastId = 0;
   let unlisteners: Array<() => void> = [];
   let toastTimers: Record<number, ReturnType<typeof setTimeout>> = {};
+  let routingPollTimer: ReturnType<typeof setInterval> | null = null;
+  let routingPollPending = false;
   let destroyed = false;
 
   $: menuCell = menu ? snapshot?.cells.find((cell) => cell.cellId === menu?.cellId && cell.sound) ?? null : null;
@@ -139,6 +146,11 @@
       const initialSnapshot = await bridge.getState();
       if (destroyed) return;
       applySnapshot(initialSnapshot, true);
+      try {
+        audioRouting = await bridge.getAudioRouting();
+      } catch (error) {
+        presentError(error);
+      }
       status = 'ready';
     } catch (error) {
       cleanupListeners();
@@ -298,6 +310,57 @@
     }
   }
 
+  async function openAudioRouting(opener: HTMLElement | null) {
+    audioRoutingDialog = { opener };
+    try {
+      audioRouting = await bridge.getAudioRouting();
+    } catch (error) {
+      presentError(error);
+    }
+  }
+
+  async function configureAudioRouting(input: AudioRoutingInput) {
+    try {
+      audioRouting = await bridge.configureAudioRouting({ input });
+      addToast('Your microphone and soundboard are now routed to the virtual input.', 'info');
+    } catch (error) {
+      throw normalizeApiError(error);
+    }
+  }
+
+  async function disableAudioRouting() {
+    try {
+      audioRouting = await bridge.disableAudioRouting();
+      addToast('Virtual-microphone routing stopped.', 'info');
+    } catch (error) {
+      throw normalizeApiError(error);
+    }
+  }
+
+  async function refreshAudioRouting() {
+    try {
+      audioRouting = await bridge.getAudioRouting();
+    } catch (error) {
+      throw normalizeApiError(error);
+    }
+  }
+
+  async function pollAudioRouting() {
+    if (routingPollPending || !audioRouting?.settings.enabled) return;
+    routingPollPending = true;
+    const previousStatus = audioRouting.status;
+    try {
+      audioRouting = await bridge.getAudioRouting();
+      if (previousStatus === 'active' && audioRouting.status === 'error') {
+        addToast(audioRouting.error?.message ?? 'Audio routing stopped unexpectedly.', 'error', true);
+      }
+    } catch {
+      // An explicit refresh still reports enumeration errors in the dialog.
+    } finally {
+      routingPollPending = false;
+    }
+  }
+
   function initialDiagnostic() {
     if (!initialError) return '';
     if (initialError.code === 'STATE_VERSION_UNSUPPORTED') {
@@ -308,12 +371,15 @@
 
   onMount(() => {
     void initialize();
+    routingPollTimer = setInterval(() => void pollAudioRouting(), 5000);
     return () => {
       destroyed = true;
       if (shortcutDialog) void bridge.setShortcutCaptureActive({ active: false });
       cleanupListeners();
       Object.values(toastTimers).forEach((timer) => clearTimeout(timer));
       toastTimers = {};
+      if (routingPollTimer) clearInterval(routingPollTimer);
+      routingPollTimer = null;
     };
   });
 </script>
@@ -324,7 +390,9 @@
       rows={snapshot.grid.rows}
       columns={snapshot.grid.columns}
       disabled={anyMutationPending}
+      routingStatus={audioRouting?.status ?? 'disabled'}
       onOpenSettings={(opener) => (settingsDialog = { opener })}
+      onOpenAudioRouting={openAudioRouting}
     />
     <main>
       <SoundGrid
@@ -402,6 +470,17 @@
     opener={settingsDialog.opener}
     onCancel={() => (settingsDialog = null)}
     onApply={resizeGrid}
+  />
+{/if}
+
+{#if audioRoutingDialog && audioRouting}
+  <AudioRoutingDialog
+    snapshot={audioRouting}
+    opener={audioRoutingDialog.opener}
+    onCancel={() => (audioRoutingDialog = null)}
+    onApply={configureAudioRouting}
+    onDisable={disableAudioRouting}
+    onRefresh={refreshAudioRouting}
   />
 {/if}
 

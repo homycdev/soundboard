@@ -1,16 +1,20 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
-import type { ApiError, AppSnapshot } from './lib/api/contract';
+import type { ApiError, AppSnapshot, AudioRoutingSnapshot } from './lib/api/contract';
 import {
   MockSoundboardBridge,
+  createDemoRoutingSnapshot,
   createDemoSnapshot,
   createEmptySnapshot,
   createSound,
 } from './lib/api/mockBridge';
 
-async function renderApp(snapshot: AppSnapshot = createEmptySnapshot()) {
-  const bridge = new MockSoundboardBridge(snapshot);
+async function renderApp(
+  snapshot: AppSnapshot = createEmptySnapshot(),
+  routing: AudioRoutingSnapshot = createDemoRoutingSnapshot(),
+) {
+  const bridge = new MockSoundboardBridge(snapshot, routing);
   const view = render(App, { props: { bridge } });
   await screen.findByRole('grid', { name: 'Sound cells' });
   return { bridge, view };
@@ -34,6 +38,67 @@ describe('Soundboard', () => {
     expect(cells).toHaveLength(16);
     expect(cells[0]).toHaveAccessibleName('Row 1, column 1, empty, add sound');
     expect(cells[15]).toHaveAccessibleName('Row 4, column 4, empty, add sound');
+  });
+
+  it('configures and stops virtual-microphone routing from the Audio dialog', async () => {
+    const { bridge } = await renderApp();
+    const configureSpy = vi.spyOn(bridge, 'configureAudioRouting');
+    const disableSpy = vi.spyOn(bridge, 'disableAudioRouting');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Audio' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Audio routing' });
+    expect(within(dialog).getByRole('combobox', { name: 'Your microphone' })).toHaveValue(
+      'mock:built-in-mic',
+    );
+    expect(within(dialog).getByRole('combobox', { name: 'Virtual output' })).toHaveValue(
+      'mock:blackhole',
+    );
+
+    await fireEvent.input(within(dialog).getByRole('slider', { name: 'Microphone gain' }), {
+      target: { value: '85' },
+    });
+    await fireEvent.input(within(dialog).getByRole('slider', { name: 'Soundboard gain' }), {
+      target: { value: '120' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Start routing' }));
+
+    expect(configureSpy).toHaveBeenCalledWith({
+      input: {
+        inputDeviceId: 'mock:built-in-mic',
+        virtualOutputDeviceId: 'mock:blackhole',
+        microphoneGainPercent: 85,
+        soundboardGainPercent: 120,
+        monitorEnabled: true,
+      },
+    });
+    expect(await within(dialog).findByText('Routing is active')).toBeInTheDocument();
+
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('dialog', { name: 'Audio routing' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Audio' })).toHaveClass('active');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Audio' }));
+    const reopened = await screen.findByRole('dialog', { name: 'Audio routing' });
+    expect(within(reopened).getByText('Routing is active')).toBeInTheDocument();
+    await fireEvent.click(within(reopened).getByRole('button', { name: 'Stop routing' }));
+    expect(disableSpy).toHaveBeenCalledTimes(1);
+    expect(await within(reopened).findByText('Routing is off')).toBeInTheDocument();
+  });
+
+  it('explains the external driver prerequisite when no virtual output is detected', async () => {
+    const routing = createDemoRoutingSnapshot();
+    routing.outputDevices = routing.outputDevices.filter((device) => !device.isVirtual);
+    routing.driverDetected = false;
+    await renderApp(createEmptySnapshot(), routing);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Audio' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Audio routing' });
+    expect(within(dialog).getByText('BlackHole 2ch was not detected.')).toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'Open official download page' })).toHaveAttribute(
+      'href',
+      'https://existential.audio/blackhole/',
+    );
+    expect(within(dialog).getByRole('button', { name: 'Start routing' })).toBeDisabled();
   });
 
   it('imports from an empty-cell click and treats picker cancellation as a no-op', async () => {

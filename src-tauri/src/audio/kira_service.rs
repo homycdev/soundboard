@@ -6,14 +6,20 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kira::Decibels;
+use kira::backend::cpal::CpalBackendSettings;
 use kira::sound::static_sound::StaticSoundData;
 use kira::track::MainTrackBuilder;
 use kira::{AudioManager, AudioManagerSettings, DefaultBackend, PlaySoundError};
 use uuid::Uuid;
 
+use super::routing::{MicrophonePassthrough, enumerate_devices, find_device};
+use crate::domain::AudioRoutingSettings;
 use crate::dto::{PlaybackFailed, PlaybackStarted};
 use crate::error::ApiError;
-use crate::ports::{AudioMetadata, AudioService, PlaybackEventSink, PlaybackRequest};
+use crate::ports::{
+    AudioMetadata, AudioRoutingRuntime, AudioService, PlaybackEventSink, PlaybackRequest,
+};
 
 const AUDIO_QUEUE_CAPACITY: usize = 256;
 const VOICE_CAPACITY: usize = 256;
@@ -35,6 +41,63 @@ enum Message {
         request: PlaybackRequest,
         reply: Option<mpsc::Sender<Result<String, ApiError>>>,
     },
+    RoutingRuntime {
+        reply: mpsc::Sender<Result<AudioRoutingRuntime, ApiError>>,
+    },
+    ConfigureRouting {
+        settings: AudioRoutingSettings,
+        reply: mpsc::Sender<Result<(), ApiError>>,
+    },
+    DisableRouting {
+        reply: mpsc::Sender<Result<(), ApiError>>,
+    },
+}
+
+struct RunningRouting {
+    manager: AudioManager<DefaultBackend>,
+    microphone: MicrophonePassthrough,
+    settings: AudioRoutingSettings,
+}
+
+impl RunningRouting {
+    fn start(settings: AudioRoutingSettings) -> Result<Self, ApiError> {
+        settings.validate()?;
+        let input_id = settings
+            .input_device_id
+            .as_deref()
+            .expect("enabled routing has an input device");
+        let output_id = settings
+            .virtual_output_device_id
+            .as_deref()
+            .expect("enabled routing has an output device");
+        let input_device = find_device(input_id, true)?;
+        let output_device = find_device(output_id, false)?;
+        let manager_settings = AudioManagerSettings {
+            main_track_builder: MainTrackBuilder::default().sound_capacity(VOICE_CAPACITY),
+            backend_settings: CpalBackendSettings {
+                device: Some(output_device.clone()),
+                config: None,
+            },
+            ..AudioManagerSettings::default()
+        };
+        let manager = AudioManager::<DefaultBackend>::new(manager_settings).map_err(|error| {
+            log::warn!("virtual soundboard output could not initialize: {error}");
+            ApiError::new(
+                "AUDIO_ROUTING_FAILED",
+                "The virtual output could not be opened. Confirm the virtual audio driver is installed and not in exclusive use.",
+            )
+        })?;
+        let microphone = MicrophonePassthrough::start(
+            &input_device,
+            &output_device,
+            settings.microphone_gain_percent,
+        )?;
+        Ok(Self {
+            manager,
+            microphone,
+            settings,
+        })
+    }
 }
 
 pub struct KiraAudioService {
@@ -131,6 +194,21 @@ impl AudioService for KiraAudioService {
             self.queue_failure(&request, &api_error);
         }
     }
+
+    fn routing_runtime(&self) -> Result<AudioRoutingRuntime, ApiError> {
+        self.request(|reply| Message::RoutingRuntime { reply })
+    }
+
+    fn configure_routing(&self, settings: &AudioRoutingSettings) -> Result<(), ApiError> {
+        self.request(|reply| Message::ConfigureRouting {
+            settings: settings.clone(),
+            reply,
+        })
+    }
+
+    fn disable_routing(&self) -> Result<(), ApiError> {
+        self.request(|reply| Message::DisableRouting { reply })
+    }
 }
 
 fn run_worker(
@@ -155,6 +233,8 @@ fn run_worker(
     };
     let _ = ready.send(());
     let mut sounds: HashMap<String, StaticSoundData> = HashMap::new();
+    let mut routing: Option<RunningRouting> = None;
+    let mut last_routing_error: Option<ApiError> = None;
 
     while let Ok(message) = receiver.recv() {
         match message {
@@ -178,7 +258,7 @@ fn run_worker(
                 sounds.remove(&sound_id);
             }
             Message::Play { request, reply } => {
-                let result = play_one(manager.as_mut(), &sounds, &request);
+                let result = play_one(manager.as_mut(), routing.as_mut(), &sounds, &request);
                 match &result {
                     Ok(instance_id) => events.started(playback_started_event(
                         &request,
@@ -196,6 +276,52 @@ fn run_worker(
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }
+            }
+            Message::RoutingRuntime { reply } => {
+                let result = enumerate_devices().map(|(input_devices, output_devices)| {
+                    let stream_error = routing
+                        .as_ref()
+                        .and_then(|running| running.microphone.error())
+                        .map(|message| {
+                            ApiError::new(
+                                "AUDIO_ROUTING_INTERRUPTED",
+                                format!("Audio routing stopped unexpectedly: {message}"),
+                            )
+                        });
+                    AudioRoutingRuntime {
+                        active: routing.is_some() && stream_error.is_none(),
+                        input_devices,
+                        output_devices,
+                        error: stream_error.or_else(|| last_routing_error.clone()),
+                    }
+                });
+                let _ = reply.send(result);
+            }
+            Message::ConfigureRouting { settings, reply } => {
+                let previous_settings = routing.as_ref().map(|running| running.settings.clone());
+                routing = None;
+                match RunningRouting::start(settings) {
+                    Ok(next) => {
+                        routing = Some(next);
+                        last_routing_error = None;
+                        available.store(true, Ordering::Release);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(error) => {
+                        if let Some(previous_settings) = previous_settings {
+                            routing = RunningRouting::start(previous_settings).ok();
+                        }
+                        last_routing_error = routing.is_none().then(|| error.clone());
+                        available.store(manager.is_some() || routing.is_some(), Ordering::Release);
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            Message::DisableRouting { reply } => {
+                routing = None;
+                last_routing_error = None;
+                available.store(manager.is_some(), Ordering::Release);
+                let _ = reply.send(Ok(()));
             }
         }
     }
@@ -230,26 +356,57 @@ fn metadata(sound: &StaticSoundData) -> AudioMetadata {
 
 fn play_one(
     manager: Option<&mut AudioManager<DefaultBackend>>,
+    routing: Option<&mut RunningRouting>,
     sounds: &HashMap<String, StaticSoundData>,
     request: &PlaybackRequest,
 ) -> Result<String, ApiError> {
-    let Some(manager) = manager else {
-        return Err(ApiError::audio_device());
-    };
     let Some(sound) = sounds.get(&request.sound_id) else {
         return Err(ApiError::new(
             "AUDIO_DECODE_FAILED",
             "This sound is not available for playback.",
         ));
     };
-    manager.play(sound.clone()).map_err(|error| match error {
+
+    if let Some(routing) = routing {
+        let volume = gain_decibels(routing.settings.soundboard_gain_percent);
+        routing
+            .manager
+            .play(sound.volume(volume))
+            .map_err(play_error)?;
+        if routing.settings.monitor_enabled
+            && let Some(manager) = manager
+            && let Err(error) = manager.play(sound.clone())
+        {
+            log::warn!(
+                "local monitoring could not start: {}",
+                play_error(error).message
+            );
+        }
+    } else {
+        let Some(manager) = manager else {
+            return Err(ApiError::audio_device());
+        };
+        manager.play(sound.clone()).map_err(play_error)?;
+    }
+    Ok(Uuid::new_v4().to_string())
+}
+
+fn gain_decibels(percent: u16) -> Decibels {
+    if percent == 0 {
+        Decibels::SILENCE
+    } else {
+        Decibels(20.0 * (f32::from(percent) / 100.0).log10())
+    }
+}
+
+fn play_error<E>(error: PlaySoundError<E>) -> ApiError {
+    match error {
         PlaySoundError::SoundLimitReached => ApiError::new(
             "PLAYBACK_LIMIT_REACHED",
             "The simultaneous playback limit has been reached.",
         ),
         PlaySoundError::IntoSoundError(_) => ApiError::internal(),
-    })?;
-    Ok(Uuid::new_v4().to_string())
+    }
 }
 
 fn unix_time_ms() -> u64 {

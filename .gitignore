@@ -1,0 +1,10 @@
+/target
+/node_modules
+/dist
+/.svelte-kit
+/coverage
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example

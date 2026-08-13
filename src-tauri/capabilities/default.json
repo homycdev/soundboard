@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimum capabilities for the Soundboard main window",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

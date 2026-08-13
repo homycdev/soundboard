@@ -1,0 +1,78 @@
+name: Release installers
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Apple Silicon
+            platform: macos-latest
+            target: aarch64-apple-darwin
+            bundle: dmg
+            apple_signing_identity: "-"
+          - label: macOS Intel
+            platform: macos-latest
+            target: x86_64-apple-darwin
+            bundle: dmg
+            apple_signing_identity: "-"
+          - label: Windows x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            apple_signing_identity: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy,rustfmt
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate frontend
+        run: npm run validate
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Build and publish installer
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.apple_signing_identity }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Soundboard ${{ github.ref_name }}
+          releaseBody: Download the installer for your operating system from the assets below.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: false
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+          releaseAssetNamePattern: Soundboard_[version]_[platform]_[arch][setup][ext]

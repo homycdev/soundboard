@@ -8,6 +8,10 @@
   A fast, local-first desktop soundboard with overlapping playback and global keyboard shortcuts.
 </p>
 
+<p align="center">
+  <img src="docs/images/soundboard-main-window.png" alt="Soundboard main window showing a 4 by 4 grid with imported sounds and keyboard shortcuts" width="900">
+</p>
+
 ## Download
 
 [Download the latest release](../../releases/latest) from GitHub Releases:

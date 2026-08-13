@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/soundboard-main-window.png" alt="Soundboard main window showing a 4 by 4 grid with imported sounds and keyboard shortcuts" width="900">
+  <img src="docs/images/soundboard-main-window.png" alt="Soundboard main window showing a 3 by 3 grid, imported sounds, keyboard shortcuts, and active audio routing" width="900">
 </p>
 
 ## Download
@@ -52,6 +52,10 @@ Soundboard uses an existing virtual audio driver; it does not install or bundle 
 - **Windows:** [VB-CABLE](https://vb-audio.com/Cable/) (run its installer as Administrator and reboot when requested)
 
 Then configure routing:
+
+<p align="center">
+  <img src="docs/images/soundboard-audio-routing.png" alt="Soundboard audio-routing dialog configured with a MacBook microphone and BlackHole 2ch virtual output" width="720">
+</p>
 
 1. Open **Audio** in the Soundboard header.
 2. Choose the physical microphone that carries your voice.
